@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>作業日報（スタンドアロン）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 0 auto; padding: 16px; max-width: 760px; }
+    h1 { font-size: 1.25rem; margin: 0 0 12px; }
+    fieldset { border: 1px solid #ccc; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+    legend { padding: 0 6px; font-weight: 600; }
+    label { display: block; font-size: 0.95rem; margin: 8px 0 4px; }
+    input, select, textarea, button { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #bbb; font-size: 1rem; background: var(--input-bg,#fff); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .grid { display: grid; gap: 12px; }
+    .muted { color: #666; font-size: 0.85rem; }
+    .right { text-align: right; }
+    .btn { background: #0a7cff; color: #fff; border: none; }
+    .btn.secondary { background: #666; color: #fff; }
+    .btn.danger { background: #b00020; color: #fff; }
+    .sticky-footer { position: sticky; bottom: 0; background: var(--bg, #fff); padding: 12px 0; }
+    .tag { display: inline-block; background: #eef4ff; color: #0a459f; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 10px; background: var(--card,#fff); }
+    .invalid { outline: 2px solid #d93025; border-color: #d93025; }
+    .ok { color: #0c7a43; font-weight: 600; }
+    .warn { color: #b45309; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>作業日報（スマホ入力用）</h1>
+
+  <!-- ===== 設定（必要に応じて編集可） ===== -->
+  <script>
+    // ▼日跨ぎの扱い： "add24"=翌日補正（+24h）, "error"=終了<開始はエラー
+    const OVERNIGHT_MODE = "add24"; // ← "error" に変えると厳格エラー運用
+
+    // ▼目標の出退勤
+    const TARGET_IN  = "08:00";
+    const TARGET_OUT = "17:45";
+
+    // ▼選択肢
+    const NAME_CHOICES = ["西出","堀内","大井","安立","新道","林"];
+    const PLACE_CHOICES = ["SBテント","ロイカテント","支社第一物流","SCM","その他"];
+    const WORK_CHOICES_1_TO_15 = Array.from({length: 15}, (_,i)=> String(i+1));
+  </script>
+
+  <fieldset>
+    <legend>基本情報</legend>
+    <div class="row">
+      <label>日付
+        <input type="date" id="date">
+      </label>
+      <label>氏名
+        <select id="name">
+          <option value="">選択してください</option>
+        </select>
+      </label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>出退勤（差異はh換算。例：45分→0.75h）</legend>
+    <div class="row">
+      <label>目標 出勤
+        <input id="targetIn" value="08:00" disabled>
+      </label>
+      <label>目標 退勤
+        <input id="targetOut" value="17:45" disabled>
+      </label>
+    </div>
+    <div class="row">
+      <label>実出勤（15分刻み）
+        <select id="actualIn"></select>
+      </label>
+      <label>実退勤（15分刻み）
+        <select id="actualOut"></select>
+      </label>
+    </div>
+    <div class="row">
+      <label>所定時間（分）
+        <input id="targetMinutes" disabled>
+      </label>
+      <label>実労働時間（分）
+        <input id="actualMinutes" disabled>
+      </label>
+    </div>
+    <div class="row">
+      <label>差異（h, 小数）
+        <input id="diffHours" disabled>
+      </label>
+      <label>差異理由（差異≠0なら必須）
+        <input id="diffReason" placeholder="例）引取対応のため">
+      </label>
+    </div>
+    <div id="diffNote" class="muted"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>作業行（最大15件） <span class="tag">15分刻み</span></legend>
+    <div id="lines" class="grid"></div>
+    <div class="row">
+      <button class="btn" id="addLine">＋ 行を追加</button>
+      <button class="btn secondary" id="clearAll">全行クリア</button>
+    </div>
+    <p class="muted">※ 各行は「場所／取扱作業(1-15)／作業項目(1-15)／開始／終了」を入力します。工数（分）は自動計算。<br>
+    ※ 日跨ぎ（例：22:00→翌1:00）は現在「+24h補正」で計算しています（設定で変更可）。</p>
+  </fieldset>
+
+  <div class="sticky-footer">
+    <div class="grid">
+      <div class="row">
+        <button class="btn" id="download">CSVダウンロード</button>
+        <button class="btn secondary" id="shareCsv">共有（メール/LINE等）</button>
+      </div>
+      <div id="msg" class="muted"></div>
+    </div>
+  </div>
+
+<script>
+  // ====== ユーティリティ ======
+  const pad = (n) => n.toString().padStart(2, "0");
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  }
+  function buildTimeOptions(step=15) {
+    const opts = [];
+    for (let h=0; h<24; h++) {
+      for (let m=0; m<60; m+=step) {
+        opts.push(`${pad(h)}:${pad(m)}`);
+      }
+    }
+    return opts;
+  }
+  const TIME_OPTS_15 = buildTimeOptions(15);
+
+  function timeToMinutes(t) {
+    if (!t) return null;
+    const [hh, mm] = t.split(":").map(Number);
+    return hh*60 + mm;
+  }
+  function diffMinutes(start, end) {
+    const s = timeToMinutes(start);
+    const e = timeToMinutes(end);
+    if (s==null || e==null) return null;
+    if (e >= s) return e - s;
+    // 終了<開始
+    if (OVERNIGHT_MODE === "add24") return (e + 1440) - s;
+    if (OVERNIGHT_MODE === "error") return NaN; // エラー扱い
+    return 0;
+  }
+  function minutesToHoursDecimal(min) {
+    return (min/60);
+  }
+  function fmtHours(h) { // 小数2桁（末尾0はそのまま）
+    return (Math.round(h*100)/100).toFixed(2);
+  }
+
+  function toBOMCSV(rows) {
+    const header = Object.keys(rows[0]);
+    const esc = (v) => {
+      const s = (v ?? "").toString();
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const body = rows.map(r => header.map(k => esc(r[k])).join(",")).join("\n");
+    const csv = header.join(",") + "\n" + body;
+    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]); // UTF-8 BOM
+    return new Blob([bom, csv], {type: "text/csv"});
+  }
+  function saveBlob(blob, filename) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ====== 初期化 ======
+  const dateEl = document.getElementById("date");
+  const nameEl = document.getElementById("name");
+  const targetMinutesEl = document.getElementById("targetMinutes");
+  const actualMinutesEl = document.getElementById("actualMinutes");
+  const diffHoursEl = document.getElementById("diffHours");
+  const diffReasonEl = document.getElementById("diffReason");
+  const diffNoteEl = document.getElementById("diffNote");
+  const actualInEl = document.getElementById("actualIn");
+  const actualOutEl = document.getElementById("actualOut");
+  const linesEl = document.getElementById("lines");
+  const addLineBtn = document.getElementById("addLine");
+  const clearAllBtn = document.getElementById("clearAll");
+  const msgEl = document.getElementById("msg");
+
+  dateEl.value = todayStr();
+  NAME_CHOICES.forEach(n => {
+    const op = document.createElement("option"); op.value = n; op.textContent = n;
+    nameEl.appendChild(op);
+  });
+
+  function fillTimeSelect(sel, placeholder) {
+    const ph = document.createElement("option");
+    ph.value = ""; ph.textContent = placeholder ?? "--:--";
+    sel.appendChild(ph);
+    TIME_OPTS_15.forEach(t => {
+      const op = document.createElement("option");
+      op.value = t; op.textContent = t;
+      sel.appendChild(op);
+    });
+  }
+  fillTimeSelect(actualInEl, "出勤");
+  fillTimeSelect(actualOutEl, "退勤");
+
+  // 所定時間を計算表示
+  function calcTargetMinutes() {
+    const tm = diffMinutes(TARGET_IN, TARGET_OUT);
+    targetMinutesEl.value = (tm ?? 0);
+  }
+  calcTargetMinutes();
+
+  function recalcAttendance() {
+    // 実労働時間
+    const am = diffMinutes(actualInEl.value, actualOutEl.value);
+    if (am === null) {
+      actualMinutesEl.value = "";
+    } else if (Number.isNaN(am)) {
+      actualMinutesEl.value = "";
+    } else {
+      actualMinutesEl.value = am;
+    }
+
+    // 差異（h, 小数）
+    const tm = Number(targetMinutesEl.value) || 0;
+    let diffH = 0;
+    let note = "";
+    if (am === null || Number.isNaN(am)) {
+      diffHoursEl.value = "";
+      note = (OVERNIGHT_MODE === "error") ? "※ 出勤＜退勤の順に入力してください（終了＜開始はエラー運用）" : "";
+    } else {
+      diffH = minutesToHoursDecimal(am - tm);
+      const sign = diffH > 0 ? "+" : (diffH < 0 ? "−" : "");
+      diffHoursEl.value = sign + fmtHours(Math.abs(diffH));
+      const diffMin = am - tm;
+      const signMin = diffMin > 0 ? "+" : (diffMin < 0 ? "−" : "");
+      note = (diffMin === 0)
+        ? "所定どおりです。"
+        : `差異：${sign}${fmtHours(Math.abs(diffH))}h（${signMin}${Math.abs(diffMin)}分）`;
+    }
+    diffNoteEl.textContent = note;
+
+    // 差異≠0なら理由必須の見た目ガイド
+    const needReason = (actualInEl.value && actualOutEl.value && am !== null && !Number.isNaN(am) && (am - tm) !== 0);
+    diffReasonEl.classList.toggle("invalid", needReason && !diffReasonEl.value.trim());
+  }
+  actualInEl.addEventListener("change", recalcAttendance);
+  actualOutEl.addEventListener("change", recalcAttendance);
+  diffReasonEl.addEventListener("input", recalcAttendance);
+
+  // ====== 行UI ======
+  const MAX_LINES = 15;
+  function makeSelect(options, placeholder) {
+    const sel = document.createElement("select");
+    const ph = document.createElement("option");
+    ph.value = ""; ph.textContent = placeholder ?? "選択してください";
+    sel.appendChild(ph);
+    options.forEach(o => {
+      const op = document.createElement("option");
+      op.value = o; op.textContent = o;
+      sel.appendChild(op);
+    });
+    return sel;
+  }
+  function makeTimeSelect(placeholder) {
+    const sel = document.createElement("select");
+    fillTimeSelect(sel, placeholder ?? "--:--");
+    return sel;
+  }
+
+  function mkLine(lineIndex) {
+    const wrap = document.createElement("div");
+    wrap.className = "card";
+
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>行 ${lineIndex+1}</strong>`;
+    wrap.appendChild(title);
+
+    const r1 = document.createElement("div");
+    r1.className = "row-3";
+    const placeSel = makeSelect(PLACE_CHOICES, "場所");
+    const workSel = makeSelect(WORK_CHOICES_1_TO_15, "取扱作業（1-15）");
+    const taskSel = makeSelect(WORK_CHOICES_1_TO_15, "作業項目（1-15）");
+    r1.appendChild(placeSel); r1.appendChild(workSel); r1.appendChild(taskSel);
+
+    const r2 = document.createElement("div");
+    r2.className = "row-3";
+    const startSel = makeTimeSelect("開始");
+    const endSel = makeTimeSelect("終了");
+    const minutesEl = document.createElement("input");
+    minutesEl.type = "number"; minutesEl.readOnly = true; minutesEl.placeholder = "工数（分）";
+    r2.appendChild(startSel); r2.appendChild(endSel); r2.appendChild(minutesEl);
+
+    const r3 = document.createElement("div");
+    r3.className = "row";
+    const memoEl = document.createElement("input");
+    memoEl.placeholder = "備考（任意）";
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn secondary"; delBtn.textContent = "この行を削除";
+    r3.appendChild(memoEl); r3.appendChild(delBtn);
+
+    function recompute() {
+      const dm = diffMinutes(startSel.value, endSel.value);
+      if (dm === null) {
+        minutesEl.value = "";
+        markValidity();
+      } else if (Number.isNaN(dm)) {
+        minutesEl.value = "";
+        markValidity(true); // エラー
+      } else {
+        minutesEl.value = dm;
+        markValidity();
+      }
+    }
+
+    function markValidity(forceError=false) {
+      // 必須：場所/取扱作業/作業項目/開始/終了（ただし完全空行はOK）
+      const anyFilled = [placeSel.value, workSel.value, taskSel.value, startSel.value, endSel.value, memoEl.value].some(v=> (v||"").trim()!=="");
+      const need = anyFilled;
+      const dm = diffMinutes(startSel.value, endSel.value);
+      const badOvernight = (OVERNIGHT_MODE === "error" && startSel.value && endSel.value && (timeToMinutes(endSel.value) < timeToMinutes(startSel.value)));
+      const invalid = forceError || (need && (!placeSel.value || !workSel.value || !taskSel.value || !startSel.value || !endSel.value)) || badOvernight;
+
+      [placeSel, workSel, taskSel, startSel, endSel].forEach(el => el.classList.toggle("invalid", invalid && !el.value));
+      if (badOvernight) {
+        endSel.classList.add("invalid");
+      }
+      return {anyFilled, need, invalid};
+    }
+
+    startSel.addEventListener("change", recompute);
+    endSel.addEventListener("change", recompute);
+    [placeSel, workSel, taskSel, memoEl].forEach(el => el.addEventListener("input", ()=>markValidity()));
+
+    delBtn.addEventListener("click", () => {
+      linesEl.removeChild(wrap);
+      renumber();
+    });
+
+    wrap.appendChild(r1);
+    wrap.appendChild(r2);
+    wrap.appendChild(r3);
+
+    return {wrap, placeSel, workSel, taskSel, startSel, endSel, minutesEl, memoEl, markValidity};
+  }
+
+  function renumber() {
+    [...linesEl.children].forEach((c,i) => {
+      const strong = c.querySelector("strong");
+      if (strong) strong.textContent = `行 ${i+1}`;
+    });
+  }
+
+  function addLine() {
+    if (linesEl.children.length >= MAX_LINES) {
+      setMsg(`行は最大${MAX_LINES}件です。`, true);
+      return;
+    }
+    const {wrap} = mkLine(linesEl.children.length);
+    linesEl.appendChild(wrap);
+    setMsg("");
+  }
+  function clearAll() {
+    linesEl.innerHTML = "";
+    setMsg("全行をクリアしました。");
+  }
+  function setMsg(m, danger=false) {
+    msgEl.textContent = m;
+    msgEl.className = danger ? "muted warn" : "muted";
+  }
+
+  addLineBtn.addEventListener("click", addLine);
+  clearAllBtn.addEventListener("click", clearAll);
+
+  // 初期行2つ
+  addLine(); addLine();
+
+  // ====== CSV作成 ======
+  function buildCSVRows() {
+    const date = dateEl.value || todayStr();
+    const name = (nameEl.value || "").trim();
+
+    if (!name) {
+      setMsg("氏名を選択してください。", true);
+      nameEl.classList.add("invalid");
+      return null;
+    } else {
+      nameEl.classList.remove("invalid");
+    }
+
+    // 出退勤差異チェック
+    const tm = diffMinutes(TARGET_IN, TARGET_OUT) || 0;
+    const am = diffMinutes(actualInEl.value, actualOutEl.value);
+    if (am === null || Number.isNaN(am)) {
+      setMsg("実出勤と実退勤を入力してください。", true);
+      actualInEl.classList.toggle("invalid", !actualInEl.value);
+      actualOutEl.classList.toggle("invalid", !actualOutEl.value);
+      return null;
+    }
+    const diffMin = am - tm;
+    const needReason = diffMin !== 0;
+    const reason = (diffReasonEl.value || "").trim();
+    if (needReason && !reason) {
+      setMsg("差異があります。差異理由の入力が必須です。", true);
+      diffReasonEl.classList.add("invalid");
+      return null;
+    } else {
+      diffReasonEl.classList.remove("invalid");
+    }
+
+    // 明細行
+    const rows = [];
+    rows.push({
+      TYPE: "HEADER",
+      日付: date,
+      氏名: name,
+      目標出勤: TARGET_IN,
+      目標退勤: TARGET_OUT,
+      実出勤: actualInEl.value,
+      実退勤: actualOutEl.value,
+      目標所定時間分: tm,
+      実労働時間分: am,
+      差異h: (diffMin===0? "0.00" : ((diffMin>0? "+":"−") + (Math.round(Math.abs(diffMin)/60*100)/100).toFixed(2))),
+      差異分: (diffMin===0? "0" : ((diffMin>0? "+":"−") + String(Math.abs(diffMin)))),
+      差異理由: reason
+    });
+
+    let detailCount = 0;
+    for (const wrap of [...linesEl.children]) {
+      const sels = wrap.getElementsByTagName("select");
+      const inputs = wrap.getElementsByTagName("input");
+      const place = sels[0]?.value || "";
+      const work = sels[1]?.value || "";
+      const task = sels[2]?.value || "";
+      const start = sels[3]?.value || "";
+      const end   = sels[4]?.value || "";
+      const minutes = inputs[0]?.value || "";
+      const memo = inputs[1]?.value || "";
+
+      const allEmpty = [place, work, task, start, end, memo].every(v => (v||"").trim()==="");
+      if (allEmpty) continue;
+
+      // 必須検証
+      const badOvernight = (OVERNIGHT_MODE === "error" && start && end && (timeToMinutes(end) < timeToMinutes(start)));
+      if (!place || !work || !task || !start || !end || badOvernight) {
+        setMsg(`行${detailCount+1}：必須項目が未入力、または終了時刻が開始より前です。`, true);
+        return null;
+      }
+
+      rows.push({
+        TYPE: "DETAIL",
+        行: detailCount + 1,
+        場所: place,
+        取扱作業: work,
+        作業項目: task,
+        開始: start,
+        終了: end,
+        工数分: minutes,
+        備考: memo
+      });
+      detailCount++;
+    }
+
+    if (rows.length === 1) {
+      setMsg("明細が1件もありません。", true);
+      return null;
+    }
+
+    return {rows, date, name};
+  }
+
+  function filenameFor(date, name) {
+    const safeName = name.replace(/[ \t]/g,"");
+    return `${date}_${safeName}_作業日報.csv`;
+  }
+
+  document.getElementById("download").addEventListener("click", () => {
+    const built = buildCSVRows();
+    if (!built) return;
+    const {rows, date, name} = built;
+    const blob = toBOMCSV(rows);
+    const filename = filenameFor(date, name);
+    saveBlob(blob, filename);
+    setMsg(`CSVを保存しました：${filename}`);
+  });
+
+  document.getElementById("shareCsv").addEventListener("click", async () => {
+    const built = buildCSVRows();
+    if (!built) return;
+    const {rows, date, name} = built;
+    const blob = toBOMCSV(rows);
+    const filename = filenameFor(date, name);
+    const file = new File([blob], filename, {type: "text/csv"});
+
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: "作業日報CSV",
+          text: "作業日報を共有します。",
+          files: [file]
+        });
+        setMsg("共有を実行しました。");
+      } catch (e) {
+        // キャンセル等
+        setMsg("共有はキャンセルされました。");
+      }
+    } else {
+      // 非対応端末はダウンロードにフォールバック
+      saveBlob(blob, filename);
+      setMsg("この端末では共有できないため、CSVを保存しました。メールへ添付して送付してください。");
+    }
+  });
+
+</script>
+</body>
+</html>
